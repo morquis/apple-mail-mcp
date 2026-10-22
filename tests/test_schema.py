@@ -501,6 +501,76 @@ class TestMigrationV5ToV6:
         conn.close()
 
 
+class TestMigrationConcurrency:
+    """Every process migrates on open, index writer or not (#107 review).
+    The migration must be atomic and must re-check the version under
+    the write lock, or a reader that saw v5 first wipes the rows a
+    writer has already re-indexed under v6."""
+
+    def _v5(self, tmp_path: Path) -> Path:
+        path = tmp_path / "v5.db"
+        conn = init_database(path)
+        conn.execute("UPDATE schema_version SET version = 5")
+        conn.execute(
+            "INSERT INTO emails (message_id, account, mailbox) "
+            "VALUES (1, 'acc', 'Ablage')"
+        )
+        conn.commit()
+        conn.close()
+        return path
+
+    def test_stale_version_read_does_not_rerun_migration(
+        self, tmp_path: Path, monkeypatch
+    ):
+        from apple_mail_mcp.index import schema
+
+        path = self._v5(tmp_path)
+
+        # Reader B checks the version first and still sees 5 ...
+        reader = schema.create_connection(path)
+        assert schema._schema_version(reader) == 5
+
+        # ... writer A migrates and re-indexes meanwhile ...
+        writer = init_database(path)
+        writer.execute(
+            "INSERT INTO emails (message_id, account, mailbox) "
+            "VALUES (1, 'acc', 'Ablage/Nebenkosten')"
+        )
+        writer.commit()
+
+        # ... then B proceeds on its stale read.
+        schema._migrate_if_needed(reader, stale_version=5)
+
+        rows = writer.execute("SELECT mailbox FROM emails").fetchall()
+        assert [r[0] for r in rows] == ["Ablage/Nebenkosten"]
+        reader.close()
+        writer.close()
+
+    def test_failed_migration_leaves_v5_intact(
+        self, tmp_path: Path, monkeypatch
+    ):
+        from apple_mail_mcp.index import schema
+
+        path = self._v5(tmp_path)
+
+        def boom():
+            raise RuntimeError("crash mid-migration")
+
+        monkeypatch.setattr(schema, "get_schema_sql", boom)
+        with pytest.raises(RuntimeError):
+            init_database(path)
+        monkeypatch.undo()
+
+        conn = sqlite3.connect(path)
+        assert conn.execute("SELECT version FROM schema_version").fetchone()[
+            0
+        ] == 5
+        assert conn.execute("SELECT mailbox FROM emails").fetchall() == [
+            ("Ablage",)
+        ]
+        conn.close()
+
+
 class TestInsertAttachments:
     """Tests for the shared insert_attachments() helper."""
 
