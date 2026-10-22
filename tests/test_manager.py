@@ -1046,6 +1046,16 @@ class TestIdentityMailboxResolution:
     """manager.py lookups resolve the mailbox hint with identity
     semantics: exact → unambiguous leaf, never a subtree (#107)."""
 
+    @pytest.fixture(autouse=True)
+    def _no_configured_exclusions(self):
+        # Lookups resolve account exclusions lazily; keep the user's
+        # config (and JXA) out of these tests.
+        with patch(
+            "apple_mail_mcp.index.accounts.resolve_excluded_account_uuids",
+            return_value=set(),
+        ):
+            yield
+
     def teardown_method(self):
         IndexManager._instance = None
 
@@ -1157,3 +1167,42 @@ class TestIdentityMailboxResolution:
             manager.rebuild(account="uuid-1", mailbox="ablage/nebenkosten")
         left = [r[0] for r in conn.execute("SELECT mailbox FROM emails")]
         assert left == ["INBOX"]
+
+    def test_hidden_account_never_named_in_ambiguity_error(self, temp_db_path):
+        """A passive server never runs build/sync/watcher, so the cached
+        exclusion set stays empty — the lookup must resolve it itself,
+        or an ambiguity error names a hidden account's folders."""
+        from apple_mail_mcp.index.mailbox_resolver import (
+            AmbiguousMailboxError,
+        )
+
+        manager = IndexManager(db_path=temp_db_path)
+        manager.index_writer = False
+        assert manager._exclude_account_uuids == set()
+        conn = manager._get_conn()
+        for acct, mbox in [
+            ("visible", "Public/Archive"),
+            ("visible", "Other/Archive"),
+            ("hidden", "Secret Acquisition/Archive"),
+        ]:
+            conn.execute(
+                "INSERT INTO emails (message_id, account, mailbox) "
+                "VALUES (1, ?, ?)",
+                (acct, mbox),
+            )
+        conn.commit()
+
+        with patch(
+            "apple_mail_mcp.index.accounts.resolve_excluded_account_uuids",
+            return_value={"hidden"},
+        ):
+            with pytest.raises(AmbiguousMailboxError) as exc:
+                manager.find_email_path(999, mailbox="Archive")
+            assert "Secret" not in str(exc.value)
+            # With one visible candidate left, the leaf is unambiguous.
+            conn.execute("DELETE FROM emails WHERE mailbox = 'Other/Archive'")
+            conn.commit()
+            assert manager.find_email_location(1, mailbox="Archive") == (
+                "visible",
+                "Public/Archive",
+            )

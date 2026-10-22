@@ -113,6 +113,7 @@ class IndexManager:
         # (build/sync/watcher). Lets JXA-free paths like the disk
         # email count honor exclusions without their own JXA call.
         self._exclude_account_uuids: set[str] = set()
+        self._exclusions_resolved = False
         # Why the most recent sync_updates() could not read the Mail
         # store, or None if it ran (#110). "permission" = Full Disk
         # Access denied; "missing" = Mail directory not found. A
@@ -127,6 +128,7 @@ class IndexManager:
         from .accounts import resolve_excluded_account_uuids
 
         self._exclude_account_uuids = resolve_excluded_account_uuids()
+        self._exclusions_resolved = True
         return self._exclude_account_uuids
 
     def _mailbox_clause(
@@ -143,11 +145,18 @@ class IndexManager:
         Raises:
             AmbiguousMailboxError: ``mailbox`` is a leaf of several paths.
         """
+        # Resolve exclusions on first use rather than trusting the
+        # cache: an index-passive server never runs build/sync/watcher,
+        # so the cache stays empty and an ambiguity error would name a
+        # hidden account's folders. Server tools load the AccountMap
+        # first, so this costs no extra JXA call there.
+        excluded = (
+            self._exclude_account_uuids
+            if self._exclusions_resolved
+            else self._resolve_exclusions()
+        )
         paths = resolve_for_identity(
-            conn,
-            mailbox,
-            account=account,
-            exclude_accounts=self._exclude_account_uuids,
+            conn, mailbox, account=account, exclude_accounts=excluded
         )
         # An empty "IN ()" is false in SQLite: unknown → no rows.
         placeholders = ", ".join("?" for _ in paths)
