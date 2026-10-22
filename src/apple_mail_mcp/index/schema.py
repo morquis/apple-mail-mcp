@@ -382,6 +382,10 @@ def _execute_script(conn: sqlite3.Connection, script: str) -> None:
         if sqlite3.complete_statement(statement):
             conn.execute(statement)
             statement = ""
+    if statement.strip():
+        # A last statement without ";" still runs (truly incomplete
+        # SQL raises) instead of silently dropping out of a migration.
+        conn.execute(statement)
 
 
 def _run_migrations(
