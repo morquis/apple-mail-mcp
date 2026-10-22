@@ -28,6 +28,7 @@ from ..config import (
     get_index_path,
     get_index_staleness_hours,
 )
+from .mailbox_resolver import resolve_for_identity
 from .schema import (
     INSERT_EMAIL_SQL,
     init_database,
@@ -127,6 +128,30 @@ class IndexManager:
 
         self._exclude_account_uuids = resolve_excluded_account_uuids()
         return self._exclude_account_uuids
+
+    def _mailbox_clause(
+        self,
+        conn: sqlite3.Connection,
+        mailbox: str,
+        account: str | None,
+        column: str = "mailbox",
+    ) -> tuple[str, list[str]]:
+        """WHERE fragment pinning ``column`` to the stored path(s) of
+        ``mailbox``, resolved with identity semantics (exact → leaf,
+        never a subtree — see :mod:`.mailbox_resolver`).
+
+        Raises:
+            AmbiguousMailboxError: ``mailbox`` is a leaf of several paths.
+        """
+        paths = resolve_for_identity(
+            conn,
+            mailbox,
+            account=account,
+            exclude_accounts=self._exclude_account_uuids,
+        )
+        # An empty "IN ()" is false in SQLite: unknown → no rows.
+        placeholders = ", ".join("?" for _ in paths)
+        return f"{column} IN ({placeholders})", paths
 
     @classmethod
     def get_instance(cls) -> IndexManager:
@@ -652,9 +677,10 @@ class IndexManager:
 
         # Delete existing entries for rebuild scope
         if account and mailbox:
+            clause, paths = self._mailbox_clause(conn, mailbox, account)
             conn.execute(
-                "DELETE FROM emails WHERE account = ? AND mailbox = ?",
-                (account, mailbox),
+                f"DELETE FROM emails WHERE account = ? AND {clause}",
+                [account, *paths],
             )
         elif account:
             conn.execute("DELETE FROM emails WHERE account = ?", (account,))
@@ -684,9 +710,11 @@ class IndexManager:
         conn = self._get_conn()
 
         if account and mailbox:
-            sql = """SELECT message_id FROM emails
-                     WHERE account = ? AND mailbox = ?"""
-            cursor = conn.execute(sql, (account, mailbox))
+            clause, paths = self._mailbox_clause(conn, mailbox, account)
+            sql = (
+                f"SELECT message_id FROM emails WHERE account = ? AND {clause}"
+            )
+            cursor = conn.execute(sql, [account, *paths])
         elif account:
             cursor = conn.execute(
                 "SELECT message_id FROM emails WHERE account = ?", (account,)
@@ -726,8 +754,9 @@ class IndexManager:
             where.append("account = ?")
             params.append(account)
         if mailbox:
-            where.append("mailbox = ?")
-            params.append(mailbox)
+            clause, paths = self._mailbox_clause(conn, mailbox, account)
+            where.append(clause)
+            params.extend(paths)
 
         sql = (
             "SELECT account, mailbox FROM emails WHERE "
@@ -764,8 +793,9 @@ class IndexManager:
             where.append("account = ?")
             params.append(account)
         if mailbox:
-            where.append("mailbox = ?")
-            params.append(mailbox)
+            clause, paths = self._mailbox_clause(conn, mailbox, account)
+            where.append(clause)
+            params.extend(paths)
 
         sql = (
             "SELECT emlx_path FROM emails WHERE "
@@ -796,7 +826,8 @@ class IndexManager:
             account: Optional account filter (UUID) — narrows the
                 delete when the same message_id appears in multiple
                 accounts (rare).
-            mailbox: Optional mailbox filter
+            mailbox: Optional mailbox filter — full path or a leaf
+                only one mailbox has; never widens to a subtree.
 
         Returns:
             Number of rows deleted (typically 0 or 1).
@@ -814,8 +845,9 @@ class IndexManager:
             where.append("account = ?")
             params.append(account)
         if mailbox:
-            where.append("mailbox = ?")
-            params.append(mailbox)
+            clause, paths = self._mailbox_clause(conn, mailbox, account)
+            where.append(clause)
+            params.extend(paths)
 
         sql = "DELETE FROM emails WHERE " + " AND ".join(where)
         cursor = conn.execute(sql, params)
@@ -937,8 +969,11 @@ class IndexManager:
             where.append("e.account = ?")
             params.append(account)
         if mailbox:
-            where.append("e.mailbox = ?")
-            params.append(mailbox)
+            clause, paths = self._mailbox_clause(
+                conn, mailbox, account, column="e.mailbox"
+            )
+            where.append(clause)
+            params.extend(paths)
 
         sql = (
             "SELECT a.filename, a.mime_type, a.file_size, a.content_id "

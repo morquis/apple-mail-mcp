@@ -1040,3 +1040,105 @@ class TestSyncBlockedReason:
 
         assert manager.sync_updates() == 3
         assert manager.last_sync_blocked is None
+
+
+class TestIdentityMailboxResolution:
+    """manager.py lookups resolve the mailbox hint with identity
+    semantics: exact → unambiguous leaf, never a subtree (#107)."""
+
+    def teardown_method(self):
+        IndexManager._instance = None
+
+    def _manager(self, temp_db_path, rows):
+        manager = IndexManager(db_path=temp_db_path)
+        conn = manager._get_conn()
+        for msg_id, mbox in rows:
+            conn.execute(
+                "INSERT INTO emails (message_id, account, mailbox, emlx_path) "
+                "VALUES (?, 'uuid-1', ?, ?)",
+                (msg_id, mbox, f"/{mbox}/{msg_id}.emlx"),
+            )
+        conn.commit()
+        return manager, conn
+
+    def test_delete_parent_name_never_deletes_subtree(self, temp_db_path):
+        manager, conn = self._manager(
+            temp_db_path,
+            [(42, "Ablage"), (42, "Ablage/Nebenkosten"), (42, "Ablage/X")],
+        )
+
+        assert manager.delete_email(42, mailbox="Ablage") == 1
+
+        left = sorted(
+            r["mailbox"]
+            for r in conn.execute("SELECT mailbox FROM emails").fetchall()
+        )
+        assert left == ["Ablage/Nebenkosten", "Ablage/X"]
+
+    def test_delete_container_name_deletes_nothing(self, temp_db_path):
+        manager, conn = self._manager(
+            temp_db_path, [(42, "[Gmail]/Spam"), (42, "[Gmail]/All Mail")]
+        )
+        assert manager.delete_email(42, mailbox="[Gmail]") == 0
+        count = conn.execute("SELECT COUNT(*) FROM emails").fetchone()[0]
+        assert count == 2
+
+    def test_leaf_and_case_insensitive(self, temp_db_path):
+        manager, _ = self._manager(temp_db_path, [(42, "Ablage/Nebenkosten")])
+        assert manager.find_email_location(42, mailbox="nebenkosten") == (
+            "uuid-1",
+            "Ablage/Nebenkosten",
+        )
+        assert str(manager.find_email_path(42, mailbox="NEBENKOSTEN")) == (
+            "/Ablage/Nebenkosten/42.emlx"
+        )
+
+    def test_case_insensitive_exact(self, temp_db_path):
+        """Previously compared byte-exactly while search used LOWER()."""
+        manager, _ = self._manager(temp_db_path, [(42, "INBOX")])
+        assert manager.find_email_location(42, mailbox="Inbox") == (
+            "uuid-1",
+            "INBOX",
+        )
+
+    def test_nfc_hint_matches_nfd_storage(self, temp_db_path):
+        import unicodedata
+
+        nfd = unicodedata.normalize("NFD", "Gelöscht")
+        manager, _ = self._manager(temp_db_path, [(42, nfd)])
+        nfc = unicodedata.normalize("NFC", "Gelöscht")
+        assert manager.find_email_location(42, mailbox=nfc) == ("uuid-1", nfd)
+
+    def test_ambiguous_leaf_raises(self, temp_db_path):
+        from apple_mail_mcp.index.mailbox_resolver import (
+            AmbiguousMailboxError,
+        )
+
+        manager, conn = self._manager(
+            temp_db_path, [(42, "Archive/Ablage"), (42, "Projekte/Ablage")]
+        )
+        with pytest.raises(AmbiguousMailboxError):
+            manager.delete_email(42, mailbox="Ablage")
+        with pytest.raises(AmbiguousMailboxError):
+            manager.find_email_path(42, mailbox="Ablage")
+        assert conn.execute("SELECT COUNT(*) FROM emails").fetchone()[0] == 2
+
+    def test_attachments_by_leaf(self, temp_db_path):
+        manager, conn = self._manager(
+            temp_db_path, [(42, "Ablage/Nebenkosten")]
+        )
+        conn.execute(
+            "INSERT INTO attachments (email_rowid, filename) "
+            "SELECT rowid, 'a.pdf' FROM emails"
+        )
+        conn.commit()
+        atts = manager.get_email_attachments(42, mailbox="Nebenkosten")
+        assert [a["filename"] for a in atts] == ["a.pdf"]
+
+    def test_indexed_ids_by_leaf(self, temp_db_path):
+        manager, _ = self._manager(
+            temp_db_path, [(1, "Ablage/Nebenkosten"), (2, "Ablage/X")]
+        )
+        assert manager.get_indexed_message_ids(
+            account="uuid-1", mailbox="nebenkosten"
+        ) == {1}
