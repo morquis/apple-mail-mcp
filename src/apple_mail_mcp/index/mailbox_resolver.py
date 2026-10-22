@@ -207,15 +207,13 @@ def excludes_mailbox(key: str, wants: Iterable[str]) -> bool:
     Unlike search, the steps do not short-circuit: an exact match in
     one account must not shadow a leaf match in another ("Drafts" vs
     "[Gmail]/Drafts"). A path is excluded when it is the named mailbox
-    — by full path or by leaf — or lies anywhere in its subtree.
+    or lies in its subtree. A value containing "/" names one full path;
+    only a bare name also matches as a folder name at any depth.
     """
     for want in wants:
-        if (
-            key == want
-            or key.startswith(want + "/")
-            or key.endswith("/" + want)
-            or f"/{want}/" in key
-        ):
+        if key == want or key.startswith(want + "/"):
+            return True
+        if "/" not in want and (key.endswith("/" + want) or f"/{want}/" in key):
             return True
     return False
 

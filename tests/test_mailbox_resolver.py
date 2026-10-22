@@ -251,3 +251,24 @@ class TestResolveExact:
         ]
         assert resolve_exact(conn, "Nebenkosten") == []
         assert resolve_exact(conn, "[Gmail]") == []
+
+
+class TestFullPathExclusion:
+    """A value with "/" is a full path: exact match plus its subtree
+    only. Leaf and parent-name rules apply to bare names alone."""
+
+    def test_full_path_does_not_match_as_suffix(self):
+        db = TestReviewFindings()._db(
+            [
+                ("a", p)
+                for p in [
+                    "A/B",
+                    "A/B/Child",
+                    "X/A/B",
+                    "X/A/B/Child",
+                    "A/BC",
+                    "X/B",
+                ]
+            ]
+        )
+        assert resolve_exclusions(db, ["A/B"]) == ["A/B", "A/B/Child"]
