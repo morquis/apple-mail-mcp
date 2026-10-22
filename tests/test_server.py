@@ -2022,10 +2022,10 @@ class TestAmbiguityHidesExcludedAccounts:
 
         from apple_mail_mcp import server
         from apple_mail_mcp.index.accounts import AccountMap
-        from apple_mail_mcp.index.manager import IndexManager
         from apple_mail_mcp.index.mailbox_resolver import (
             AmbiguousMailboxError,
         )
+        from apple_mail_mcp.index.manager import IndexManager
 
         manager = IndexManager(db_path=tmp_path / "idx.db")
         manager.index_writer = False
