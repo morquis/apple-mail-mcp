@@ -1247,8 +1247,8 @@ async def search(
         limit: Maximum results (default: 20)
         offset: Skip first N results for pagination (default: 0)
         exclude_mailboxes: Mailboxes to exclude (default: ["Drafts"]).
-            Matched like mailbox; a bare name excludes every
-            mailbox it could mean.
+            A name excludes every mailbox it matches — full path,
+            folder name, and everything below either.
         before: Exclude emails on/after this date (YYYY-MM-DD).
         after: Include only emails on/after this date (YYYY-MM-DD).
         highlight: Wrap matched terms in **markers** in subject
