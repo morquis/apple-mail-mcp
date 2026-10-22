@@ -672,18 +672,100 @@ class TestNestedMailboxFilter:
             == []
         )
 
-    def test_resolves_once_per_call(self, nested_db):
-        """mailbox and exclude_mailboxes share one candidate query —
-        exclude_mailboxes defaults to ["Drafts"] on every search()."""
-        statements: list[str] = []
-        nested_db.set_trace_callback(statements.append)
-        try:
-            search_fts(
-                nested_db,
-                "budget",
-                mailbox="[Gmail]",
-                exclude_mailboxes=["Spam"],
+    def test_resolves_once_per_call(self, nested_db, monkeypatch):
+        """The include filter costs one candidate query per call."""
+        from apple_mail_mcp.index import mailbox_resolver
+
+        calls = []
+        real = mailbox_resolver._stored_mailboxes
+
+        def spy(*args, **kwargs):
+            calls.append(args)
+            return real(*args, **kwargs)
+
+        monkeypatch.setattr(mailbox_resolver, "_stored_mailboxes", spy)
+        search_fts(
+            nested_db, "budget", mailbox="[Gmail]", exclude_mailboxes=["Spam"]
+        )
+        assert len(calls) == 1
+
+
+class TestExclusionSnapshot:
+    """A row committed by another connection between resolving the
+    exclusions and running the query must still be excluded (#107
+    review): resolution and query share one statement's snapshot."""
+
+    @pytest.fixture
+    def two_conns(self, tmp_path):
+        from apple_mail_mcp.index.schema import (
+            create_connection,
+            get_schema_sql,
+        )
+
+        path = tmp_path / "idx.db"
+        writer = create_connection(path)
+        writer.executescript(get_schema_sql())
+        writer.execute(
+            "INSERT INTO emails (message_id, account, mailbox, subject, "
+            "sender, content, date_received, attachment_count) "
+            "VALUES (1, 'acct', 'INBOX', 'needle', 'a@b', 'needle', "
+            "'2026-01-01', 1)"
+        )
+        writer.execute(
+            "INSERT INTO attachments (email_rowid, filename) "
+            "VALUES (last_insert_rowid(), 'needle.pdf')"
+        )
+        writer.commit()
+        reader = create_connection(path)
+        yield reader, writer
+        reader.close()
+        writer.close()
+
+    def _arrive_after_resolution(self, monkeypatch, writer):
+        """Commit a Private row right after any candidate lookup."""
+        from apple_mail_mcp.index import mailbox_resolver
+
+        real = mailbox_resolver._stored_mailboxes
+        done = []
+
+        def racing(*args, **kwargs):
+            result = real(*args, **kwargs)
+            if done:
+                return result
+            done.append(True)
+            writer.execute(
+                "INSERT INTO emails (message_id, account, mailbox, "
+                "subject, sender, content, date_received, attachment_count) "
+                "VALUES (2, 'acct', 'Private', 'needle', 'a@b', 'needle', "
+                "'2026-01-01', 1)"
             )
-        finally:
-            nested_db.set_trace_callback(None)
-        assert sum("DISTINCT" in s for s in statements) == 1
+            writer.execute(
+                "INSERT INTO attachments (email_rowid, filename) "
+                "VALUES (last_insert_rowid(), 'needle.pdf')"
+            )
+            writer.commit()
+            return result
+
+        monkeypatch.setattr(mailbox_resolver, "_stored_mailboxes", racing)
+
+    def test_search(self, two_conns, monkeypatch):
+        reader, writer = two_conns
+        self._arrive_after_resolution(monkeypatch, writer)
+        hits = search_fts(reader, "needle", exclude_mailboxes=["Private"])
+        assert [h.mailbox for h in hits] == ["INBOX"]
+
+    def test_highlight(self, two_conns, monkeypatch):
+        reader, writer = two_conns
+        self._arrive_after_resolution(monkeypatch, writer)
+        hits = search_fts_highlight(
+            reader, "needle", exclude_mailboxes=["Private"]
+        )
+        assert [h.mailbox for h in hits] == ["INBOX"]
+
+    def test_attachments(self, two_conns, monkeypatch):
+        reader, writer = two_conns
+        self._arrive_after_resolution(monkeypatch, writer)
+        rows = search_attachments(
+            reader, "needle", exclude_mailboxes=["Private"]
+        )
+        assert {r["mailbox"] for r in rows} == {"INBOX"}

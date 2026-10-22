@@ -25,6 +25,7 @@ so a byte-exact compare misses every non-ASCII name (#120).
 
 from __future__ import annotations
 
+import functools
 import json
 import sqlite3
 import unicodedata
@@ -231,28 +232,41 @@ def _resolve_union(
     )
 
 
-def resolve_search_filters(
-    conn: sqlite3.Connection,
-    mailbox: str | None,
-    exclude_mailboxes: Iterable[str] | None,
-    *,
-    account: str | None = None,
-    exclude_accounts: Iterable[str] | None = None,
-) -> tuple[list[str] | None, list[str]]:
-    """:func:`resolve_for_search` and :func:`resolve_exclusions` over a
-    single candidate query — search() always carries an exclusion
-    (default ``["Drafts"]``), so this is the common case.
+@functools.lru_cache(maxsize=32)
+def _parse_wants(wants_json: str) -> tuple[str, ...]:
+    return tuple(json.loads(wants_json))
 
-    Returns:
-        (include, exclude): ``include`` is None when ``mailbox`` is
-        unset, otherwise the resolved paths (possibly empty).
 
-    Raises:
-        AmbiguousMailboxError: ``mailbox`` is a leaf of several paths.
+def _sql_mailbox_excluded(mailbox: str | None, wants_json: str) -> bool:
+    if mailbox is None:
+        return False
+    return excludes_mailbox(
+        normalize_mailbox(mailbox), _parse_wants(wants_json)
+    )
+
+
+def exclusion_clause(
+    conn: sqlite3.Connection, column: str, values: Iterable[str]
+) -> tuple[str, list[str]]:
+    """SQL fragment excluding every mailbox :func:`resolve_exclusions`
+    would return, resolved inside the caller's own statement.
+
+    Resolving in Python first and querying afterwards leaves a gap:
+    mail committed to a newly seen excluded mailbox in between slips
+    through, and an empty resolution dropped the predicate entirely.
+    One statement reads one snapshot. An explicit read transaction
+    around both is no option — the index connection is shared with
+    the background sync thread.
     """
-    stored = _stored_mailboxes(conn, account, exclude_accounts)
-    include = None
-    if mailbox:
-        include = _resolve(stored, mailbox, subtree=True, union_ambiguous=False)
-    exclude = _resolve_union(stored, exclude_mailboxes or ())
-    return include, exclude
+    conn.create_function(
+        "mailbox_excluded", 2, _sql_mailbox_excluded, deterministic=True
+    )
+    wants = json.dumps(sorted({normalize_mailbox(v) for v in values}))
+    # Candidates as in _stored_mailboxes: DISTINCT over the covering
+    # index, then the match logic once per distinct path.
+    sql = (
+        f"{column} NOT IN (SELECT mailbox FROM "
+        "(SELECT DISTINCT account, mailbox FROM emails) "
+        "WHERE mailbox_excluded(mailbox, ?))"
+    )
+    return sql, [wants]

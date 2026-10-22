@@ -19,7 +19,7 @@ import sqlite3
 from dataclasses import dataclass
 from typing import Any
 
-from .mailbox_resolver import resolve_search_filters
+from .mailbox_resolver import exclusion_clause, resolve_for_search
 
 # Characters that make a bare FTS5 token dangerous
 # (hyphens = NOT, colons = column filter, parens = grouping, etc.)
@@ -170,24 +170,21 @@ def add_account_mailbox_filter(
     if account:
         sql += f" AND {table_alias}.account = ?"
         params.append(account)
-    if mailbox or exclude_mailboxes:
-        include, exclude = resolve_search_filters(
-            conn,
-            mailbox,
-            exclude_mailboxes,
-            account=account,
-            exclude_accounts=exclude_accounts,
+    if mailbox:
+        paths = resolve_for_search(
+            conn, mailbox, account=account, exclude_accounts=exclude_accounts
         )
-        if include is not None:
-            # No match leaves an empty "IN ()", which SQLite evaluates
-            # to false: an unknown mailbox still matches nothing.
-            placeholders = ", ".join("?" for _ in include)
-            sql += f" AND {table_alias}.mailbox IN ({placeholders})"
-            params.extend(include)
-        if exclude:
-            placeholders = ", ".join("?" for _ in exclude)
-            sql += f" AND {table_alias}.mailbox NOT IN ({placeholders})"
-            params.extend(exclude)
+        # No match leaves an empty "IN ()", which SQLite evaluates to
+        # false: an unknown mailbox still matches nothing.
+        placeholders = ", ".join("?" for _ in paths)
+        sql += f" AND {table_alias}.mailbox IN ({placeholders})"
+        params.extend(paths)
+    if exclude_mailboxes:
+        clause, clause_params = exclusion_clause(
+            conn, f"{table_alias}.mailbox", exclude_mailboxes
+        )
+        sql += f" AND {clause}"
+        params.extend(clause_params)
     if exclude_accounts:
         placeholders = ", ".join("?" for _ in exclude_accounts)
         sql += f" AND {table_alias}.account NOT IN ({placeholders})"
