@@ -237,6 +237,9 @@ def _parse_wants(wants_json: str) -> tuple[str, ...]:
     return tuple(json.loads(wants_json))
 
 
+# Pure, and called once per distinct mailbox on every search that
+# excludes (default ["Drafts"]): ~12 µs uncached, ~1.5k mailboxes.
+@functools.lru_cache(maxsize=16384)
 def _sql_mailbox_excluded(mailbox: str | None, wants_json: str) -> bool:
     if mailbox is None:
         return False
