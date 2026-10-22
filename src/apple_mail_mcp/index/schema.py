@@ -17,7 +17,7 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 # Current schema version for migrations
-SCHEMA_VERSION = 5  # Bumped for failed_index_jobs (DLQ) support
+SCHEMA_VERSION = 6  # Bumped to re-index full nested mailbox paths (#105)
 
 # Default PRAGMAs for all connections (centralized to avoid drift)
 DEFAULT_PRAGMAS = {
@@ -439,6 +439,34 @@ def _run_migrations(
                 ON failed_index_jobs(account, mailbox);
         """)
         logger.info("Migration v4→v5 complete.")
+
+    if from_version < 6:
+        # Migration from v5 to v6: mailbox values are full paths now
+        # ("Ablage/Nebenkosten", #105). Older rows collapsed nested
+        # mailboxes onto their outermost parent, which yields silently
+        # wrong search results rather than visibly stale ones. Clear
+        # them; the next startup sync repopulates from disk. sync_state
+        # and the DLQ carry the same collapsed names.
+        logger.info("Migrating schema v5→v6: clearing rows for re-index")
+        # Drop and recreate rather than DELETE: the per-row FTS delete
+        # trigger takes seconds on a large index, a drop ~0.1s.
+        conn.executescript("""
+            DROP TABLE IF EXISTS attachments;
+            DROP TABLE IF EXISTS emails_fts;
+            DROP TABLE IF EXISTS emails;
+            DROP TABLE IF EXISTS sync_state;
+            DROP TABLE IF EXISTS failed_index_jobs;
+        """)
+        conn.executescript(get_schema_sql())
+        logger.info("Migration v5→v6 complete.")
+        import sys
+
+        print(
+            "\n⚠ Upgraded to schema v6 (full paths for nested mailboxes).\n"
+            "  The index was cleared and is rebuilt by the next sync —\n"
+            "  searches return partial results until it completes.\n",
+            file=sys.stderr,
+        )
 
     conn.execute("UPDATE schema_version SET version = ?", (to_version,))
     conn.commit()
