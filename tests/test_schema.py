@@ -562,9 +562,10 @@ class TestMigrationConcurrency:
         monkeypatch.undo()
 
         conn = sqlite3.connect(path)
-        assert conn.execute("SELECT version FROM schema_version").fetchone()[
-            0
-        ] == 5
+        assert (
+            conn.execute("SELECT version FROM schema_version").fetchone()[0]
+            == 5
+        )
         assert conn.execute("SELECT mailbox FROM emails").fetchall() == [
             ("Ablage",)
         ]
