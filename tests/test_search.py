@@ -769,3 +769,17 @@ class TestExclusionSnapshot:
             reader, "needle", exclude_mailboxes=["Private"]
         )
         assert {r["mailbox"] for r in rows} == {"INBOX"}
+
+
+def test_exclusions_work_while_connection_is_busy(nested_db):
+    """The index connection is shared with the sync thread. SQLite
+    refuses to (re)define a function while a statement is active, so
+    exclusions must not register one per query."""
+    search_fts(nested_db, "budget", exclude_mailboxes=["Steuer"])
+    busy = nested_db.execute("SELECT rowid FROM emails")
+    busy.fetchone()  # leave a statement mid-iteration
+    hits = search_fts(
+        nested_db, "budget", limit=20, exclude_mailboxes=["Steuer"]
+    )
+    assert sorted(h.id for h in hits) == [1, 2, 3, 6, 7, 8]
+    busy.close()

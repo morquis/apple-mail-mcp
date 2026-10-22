@@ -14,6 +14,8 @@ import os
 import sqlite3
 from pathlib import Path
 
+from .mailbox_resolver import register_sql_functions
+
 logger = logging.getLogger(__name__)
 
 # Current schema version for migrations
@@ -160,6 +162,8 @@ def create_connection(db_path: Path) -> sqlite3.Connection:
     # Apply standard PRAGMAs
     for pragma, value in DEFAULT_PRAGMAS.items():
         conn.execute(f"PRAGMA {pragma}={value}")
+
+    register_sql_functions(conn)
 
     return conn
 

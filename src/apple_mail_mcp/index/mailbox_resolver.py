@@ -245,6 +245,27 @@ def _sql_mailbox_excluded(mailbox: str | None, wants_json: str) -> bool:
     )
 
 
+def register_sql_functions(conn: sqlite3.Connection) -> None:
+    """Register the resolver's SQL functions on a new connection.
+
+    Called by the connection factory: SQLite refuses to redefine a
+    function while any statement on the connection is active, and the
+    index connection is shared with the sync thread.
+    """
+    conn.create_function(
+        "mailbox_excluded", 2, _sql_mailbox_excluded, deterministic=True
+    )
+
+
+def _ensure_sql_functions(conn: sqlite3.Connection) -> None:
+    # Connections from schema.create_connection already have it; only
+    # ones opened elsewhere get it here, defined once, never redefined.
+    try:
+        conn.execute("SELECT mailbox_excluded(NULL, '[]')")
+    except sqlite3.OperationalError:
+        register_sql_functions(conn)
+
+
 def exclusion_clause(
     conn: sqlite3.Connection, column: str, values: Iterable[str]
 ) -> tuple[str, list[str]]:
@@ -258,9 +279,7 @@ def exclusion_clause(
     around both is no option — the index connection is shared with
     the background sync thread.
     """
-    conn.create_function(
-        "mailbox_excluded", 2, _sql_mailbox_excluded, deterministic=True
-    )
+    _ensure_sql_functions(conn)
     wants = json.dumps(sorted({normalize_mailbox(v) for v in values}))
     # Candidates as in _stored_mailboxes: DISTINCT over the covering
     # index, then the match logic once per distinct path.
