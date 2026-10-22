@@ -1142,3 +1142,18 @@ class TestIdentityMailboxResolution:
         assert manager.get_indexed_message_ids(
             account="uuid-1", mailbox="nebenkosten"
         ) == {1}
+
+    def test_rebuild_mailbox_matches_full_path_only(self, temp_db_path):
+        """rebuild --mailbox DELETEs: a leaf fallback could pick some
+        other folder, so only the full path counts there."""
+        manager, conn = self._manager(
+            temp_db_path, [(1, "Ablage/Nebenkosten"), (2, "INBOX")]
+        )
+        with patch.object(manager, "build_from_disk", return_value=0):
+            manager.rebuild(account="uuid-1", mailbox="Nebenkosten")
+            assert (
+                conn.execute("SELECT COUNT(*) FROM emails").fetchone()[0] == 2
+            )
+            manager.rebuild(account="uuid-1", mailbox="ablage/nebenkosten")
+        left = [r[0] for r in conn.execute("SELECT mailbox FROM emails")]
+        assert left == ["INBOX"]

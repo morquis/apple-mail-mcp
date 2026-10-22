@@ -16,7 +16,7 @@ Two entry points encode the caller's intent:
 
 An ambiguous leaf raises :class:`AmbiguousMailboxError` with candidates
 the caller can copy verbatim. Exclusions (:func:`resolve_exclusions`)
-union ambiguous matches instead: excluding too much beats leaking.
+union every match instead: excluding too much beats leaking.
 
 Comparison is case-insensitive and Unicode-normalized: macOS stores
 mailbox names decomposed (NFD) while callers type them composed (NFC),
@@ -25,6 +25,7 @@ so a byte-exact compare misses every non-ASCII name (#120).
 
 from __future__ import annotations
 
+import json
 import sqlite3
 import unicodedata
 from collections.abc import Iterable
@@ -36,20 +37,27 @@ class AmbiguousMailboxError(ValueError):
     def __init__(self, value: str, candidates: list[str]) -> None:
         self.value = value
         self.candidates = candidates
-        options = ", ".join(f'mailbox="{c}"' for c in candidates)
+        # JSON string literals: a quote or backslash in a folder name
+        # stays escaped, so each option can be pasted back verbatim.
+        options = ", ".join(f"mailbox={_quote(c)}" for c in candidates)
         super().__init__(
-            f'Ambiguous mailbox "{value}" — specify one of: {options}'
+            f"Ambiguous mailbox {_quote(value)} — specify one of: {options}"
         )
+
+
+def _quote(text: str) -> str:
+    return json.dumps(text, ensure_ascii=False)
 
 
 def normalize_mailbox(name: str) -> str:
     """Canonical comparison key for a mailbox name or path.
 
-    NFC first, then casefold: macOS may mix decomposed and precomposed
-    characters within one name, so neither side can be trusted to
-    already be in a given form.
+    NFC first: macOS may mix decomposed and precomposed characters
+    within one name, so neither side can be trusted to already be in a
+    given form. Then lower() rather than casefold(), which would map
+    "ß" to "ss" and merge distinct folders like "Straße"/"Strasse".
     """
-    return unicodedata.normalize("NFC", name).casefold()
+    return unicodedata.normalize("NFC", name).lower()
 
 
 def _stored_mailboxes(
@@ -142,6 +150,20 @@ def resolve_for_search(
     return _resolve(stored, value, subtree=True, union_ambiguous=False)
 
 
+def resolve_exact(
+    conn: sqlite3.Connection,
+    value: str,
+    *,
+    account: str | None = None,
+) -> list[str]:
+    """Full-path match only — no subtree, no leaf. For destructive
+    calls naming a mailbox outright (``rebuild --mailbox``), where a
+    leaf fallback could pick some other folder.
+    """
+    stored = _stored_mailboxes(conn, account, None)
+    return sorted(stored.get(normalize_mailbox(value), []))
+
+
 def resolve_for_identity(
     conn: sqlite3.Connection,
     value: str,
@@ -169,22 +191,44 @@ def resolve_exclusions(
     account: str | None = None,
     exclude_accounts: Iterable[str] | None = None,
 ) -> list[str]:
-    """Resolve ``exclude_mailboxes`` with search semantics, but union
-    ambiguous leaves instead of raising. Never raises.
+    """Resolve ``exclude_mailboxes``: the union of exact, subtree and
+    leaf matches (see :func:`excludes_mailbox`). Never raises —
+    excluding too much beats leaking.
     """
     stored = _stored_mailboxes(conn, account, exclude_accounts)
     return _resolve_union(stored, values)
 
 
+def excludes_mailbox(key: str, wants: Iterable[str]) -> bool:
+    """Whether normalized path ``key`` falls under any normalized
+    exclusion in ``wants``.
+
+    Unlike search, the steps do not short-circuit: an exact match in
+    one account must not shadow a leaf match in another ("Drafts" vs
+    "[Gmail]/Drafts"). A path is excluded when it is the named mailbox
+    — by full path or by leaf — or lies anywhere in its subtree.
+    """
+    for want in wants:
+        if (
+            key == want
+            or key.startswith(want + "/")
+            or key.endswith("/" + want)
+            or f"/{want}/" in key
+        ):
+            return True
+    return False
+
+
 def _resolve_union(
     stored: dict[str, list[str]], values: Iterable[str]
 ) -> list[str]:
-    resolved: set[str] = set()
-    for value in values:
-        resolved.update(
-            _resolve(stored, value, subtree=True, union_ambiguous=True)
-        )
-    return sorted(resolved)
+    wants = [normalize_mailbox(v) for v in values]
+    return sorted(
+        raw
+        for key, raws in stored.items()
+        if excludes_mailbox(key, wants)
+        for raw in raws
+    )
 
 
 def resolve_search_filters(

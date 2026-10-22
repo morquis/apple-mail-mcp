@@ -28,7 +28,7 @@ from ..config import (
     get_index_path,
     get_index_staleness_hours,
 )
-from .mailbox_resolver import resolve_for_identity
+from .mailbox_resolver import resolve_exact, resolve_for_identity
 from .schema import (
     INSERT_EMAIL_SQL,
     init_database,
@@ -677,9 +677,13 @@ class IndexManager:
 
         # Delete existing entries for rebuild scope
         if account and mailbox:
-            clause, paths = self._mailbox_clause(conn, mailbox, account)
+            # Full path only: on this DELETE a leaf fallback could pick
+            # some other folder than the one the user named.
+            paths = resolve_exact(conn, mailbox, account=account)
+            placeholders = ", ".join("?" for _ in paths)
             conn.execute(
-                f"DELETE FROM emails WHERE account = ? AND {clause}",
+                "DELETE FROM emails WHERE account = ? "
+                f"AND mailbox IN ({placeholders})",
                 [account, *paths],
             )
         elif account:

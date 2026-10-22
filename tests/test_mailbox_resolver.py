@@ -169,8 +169,10 @@ class TestResolveExclusions:
         ]
 
     def test_subtree_and_exact(self, conn):
+        # Exclusions do not stop at the exact match: INBOX/Junk goes too.
         assert sorted(resolve_exclusions(conn, ["[Gmail]", "inbox"])) == [
             "INBOX",
+            "INBOX/Junk",
             "Inbox",
             "[Gmail]/All Mail",
             "[Gmail]/Spam",
@@ -178,3 +180,74 @@ class TestResolveExclusions:
 
     def test_unknown_names_drop_out(self, conn):
         assert resolve_exclusions(conn, ["Nonexistent"]) == []
+
+
+class TestReviewFindings:
+    """Second review round on #107."""
+
+    def _db(self, rows):
+        db = create_connection(":memory:")
+        db.executescript(get_schema_sql())
+        for i, (acct, mbox) in enumerate(rows, start=1):
+            db.execute(
+                "INSERT INTO emails (message_id, account, mailbox) "
+                "VALUES (?, ?, ?)",
+                (i, acct, mbox),
+            )
+        return db
+
+    def test_candidates_survive_a_copy_roundtrip(self):
+        """Quotes and backslashes in a name must not break the
+        copyable mailbox="..." form."""
+        import json
+        import re
+
+        tricky = ['A/"Budget"/Archive', "B\\Back/Archive"]
+        db = self._db([("a", p) for p in tricky])
+        with pytest.raises(AmbiguousMailboxError) as exc:
+            resolve_for_search(db, "Archive")
+        literals = re.findall(r'mailbox=("(?:[^"\\]|\\.)*")', str(exc.value))
+        assert sorted(json.loads(s) for s in literals) == sorted(tricky)
+        # ...and each one resolves back to exactly its own path.
+        for path in tricky:
+            assert resolve_for_search(db, path) == [path]
+
+    def test_sharp_s_is_not_folded_to_ss(self):
+        """casefold() maps ß to ss and would merge distinct folders."""
+        assert normalize_mailbox("Straße") != normalize_mailbox("Strasse")
+        db = self._db([("a", "Straße"), ("a", "Strasse")])
+        assert resolve_for_search(db, "STRASSE") == ["Strasse"]
+
+    def test_exclusions_union_exact_subtree_and_leaf(self):
+        """An exact match in one account must not shadow leaf or
+        subtree matches elsewhere: exclude too much, never too little."""
+        db = self._db(
+            [
+                ("imap", "Drafts"),
+                ("gmail", "[Gmail]/Drafts"),
+                ("gmail", "INBOX"),
+                ("a", "Ablage"),
+                ("a", "Ablage/Nebenkosten"),
+                ("a", "Archive/Ablage/2024"),
+            ]
+        )
+        assert resolve_exclusions(db, ["drafts"]) == [
+            "Drafts",
+            "[Gmail]/Drafts",
+        ]
+        assert resolve_exclusions(db, ["Ablage"]) == [
+            "Ablage",
+            "Ablage/Nebenkosten",
+            "Archive/Ablage/2024",
+        ]
+
+
+class TestResolveExact:
+    def test_exact_only(self, conn):
+        from apple_mail_mcp.index.mailbox_resolver import resolve_exact
+
+        assert resolve_exact(conn, "ablage/nebenkosten") == [
+            "Ablage/Nebenkosten"
+        ]
+        assert resolve_exact(conn, "Nebenkosten") == []
+        assert resolve_exact(conn, "[Gmail]") == []
