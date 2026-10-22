@@ -815,7 +815,10 @@ async def get_email(
             excluded_uuids = acct_map.names_to_uuids(_excluded_account_names())
 
             emlx_path = manager.find_email_path(
-                message_id, account=idx_acct, mailbox=mailbox
+                message_id,
+                account=idx_acct,
+                mailbox=mailbox,
+                exclude_accounts=excluded_uuids,
             )
             if emlx_path:
                 # A stale index row (account excluded after indexing,
@@ -918,7 +921,10 @@ async def get_email(
             excluded_uuids = acct_map.names_to_uuids(_excluded_account_names())
 
             location = manager.find_email_location(
-                message_id, account=idx_acct, mailbox=idx_mb
+                message_id,
+                account=idx_acct,
+                mailbox=idx_mb,
+                exclude_accounts=excluded_uuids,
             )
             if location:
                 idx_account, idx_mailbox = location
@@ -1037,7 +1043,10 @@ async def _resolve_emlx_path(
         idx_acct = acct_map.name_to_uuid(account) or account
 
     emlx_path = manager.find_email_path(
-        message_id, account=idx_acct, mailbox=mailbox
+        message_id,
+        account=idx_acct,
+        mailbox=mailbox,
+        exclude_accounts=excluded_uuids,
     )
     if not emlx_path:
         raise ValueError(f"Email {message_id} not found in index.")

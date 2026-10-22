@@ -2009,3 +2009,68 @@ class TestDiskPermissionErrors:
 
             with pytest.raises(RuntimeError, match="Full Disk Access"):
                 await get_email_links(42)
+
+
+class TestAmbiguityHidesExcludedAccounts:
+    """Server-level: the exclusions the server already resolved reach
+    the identity lookups, whatever the manager's own cache holds."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("tool", ["get_email", "get_email_links"])
+    async def test_no_hidden_folder_names(self, tmp_path, tool):
+        from unittest.mock import AsyncMock
+
+        from apple_mail_mcp import server
+        from apple_mail_mcp.index.accounts import AccountMap
+        from apple_mail_mcp.index.manager import IndexManager
+        from apple_mail_mcp.index.mailbox_resolver import (
+            AmbiguousMailboxError,
+        )
+
+        manager = IndexManager(db_path=tmp_path / "idx.db")
+        manager.index_writer = False
+        # Lazy manager-side resolution finds nothing (e.g. JXA failed).
+        manager._exclusions_resolved = True
+        conn = manager._get_conn()
+        for i, (acct, mbox) in enumerate(
+            [
+                ("visible-id", "Public/Archive"),
+                ("visible-id", "Other/Archive"),
+                ("hidden-id", "Secret Acquisition/Archive"),
+            ],
+            start=1,
+        ):
+            conn.execute(
+                "INSERT INTO emails (message_id, account, mailbox) "
+                "VALUES (?, ?, ?)",
+                (i, acct, mbox),
+            )
+        conn.commit()
+        account_map = AccountMap()
+        account_map.load_from_jxa(
+            [
+                {"name": "Visible", "id": "visible-id"},
+                {"name": "Hidden", "id": "hidden-id"},
+            ]
+        )
+        with (
+            patch.object(server, "_get_index_manager", return_value=manager),
+            patch.object(server, "_get_account_map", return_value=account_map),
+            patch.object(
+                server, "_excluded_account_names", return_value={"Hidden"}
+            ),
+            patch.object(
+                server,
+                "_resolve_visible_account",
+                AsyncMock(return_value="Visible"),
+            ),
+            patch.object(
+                server,
+                "execute_with_core_async",
+                AsyncMock(side_effect=AssertionError("no JXA expected")),
+            ),
+        ):
+            with pytest.raises(AmbiguousMailboxError) as exc:
+                await getattr(server, tool)(999, mailbox="Archive")
+        assert "Secret" not in str(exc.value)
+        manager.close()

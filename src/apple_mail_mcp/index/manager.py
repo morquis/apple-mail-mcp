@@ -39,7 +39,7 @@ from .schema import (
 from .search import SearchResult  # Re-use, don't duplicate
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Iterable
 
     from .watcher import IndexWatcher
 
@@ -137,6 +137,7 @@ class IndexManager:
         mailbox: str,
         account: str | None,
         column: str = "mailbox",
+        exclude_accounts: Iterable[str] | None = None,
     ) -> tuple[str, list[str]]:
         """WHERE fragment pinning ``column`` to the stored path(s) of
         ``mailbox``, resolved with identity semantics (exact → leaf,
@@ -150,11 +151,15 @@ class IndexManager:
         # so the cache stays empty and an ambiguity error would name a
         # hidden account's folders. Server tools load the AccountMap
         # first, so this costs no extra JXA call there.
-        excluded = (
+        excluded = set(
             self._exclude_account_uuids
             if self._exclusions_resolved
             else self._resolve_exclusions()
         )
+        # Callers that resolved exclusions themselves (the server) pass
+        # them too: a failed lazy resolution above degrades to "nothing
+        # excluded" and must not be the only line of defense.
+        excluded.update(exclude_accounts or ())
         paths = resolve_for_identity(
             conn, mailbox, account=account, exclude_accounts=excluded
         )
@@ -746,6 +751,8 @@ class IndexManager:
         message_id: int,
         account: str | None = None,
         mailbox: str | None = None,
+        *,
+        exclude_accounts: Iterable[str] | None = None,
     ) -> tuple[str, str] | None:
         """Look up an email's (account, mailbox) from the index.
 
@@ -756,6 +763,8 @@ class IndexManager:
             message_id: Mail.app message ID
             account: Optional account filter (UUID)
             mailbox: Optional mailbox filter
+            exclude_accounts: Account UUIDs never considered when
+                resolving ``mailbox`` (keeps them out of error messages)
 
         Returns:
             (account, mailbox) tuple or None if not found
@@ -767,7 +776,9 @@ class IndexManager:
             where.append("account = ?")
             params.append(account)
         if mailbox:
-            clause, paths = self._mailbox_clause(conn, mailbox, account)
+            clause, paths = self._mailbox_clause(
+                conn, mailbox, account, exclude_accounts=exclude_accounts
+            )
             where.append(clause)
             params.extend(paths)
 
@@ -786,6 +797,8 @@ class IndexManager:
         message_id: int,
         account: str | None = None,
         mailbox: str | None = None,
+        *,
+        exclude_accounts: Iterable[str] | None = None,
     ) -> Path | None:
         """Look up an email's .emlx file path from the index.
 
@@ -795,6 +808,8 @@ class IndexManager:
             message_id: Mail.app message ID
             account: Optional account filter (UUID)
             mailbox: Optional mailbox filter
+            exclude_accounts: Account UUIDs never considered when
+                resolving ``mailbox`` (keeps them out of error messages)
 
         Returns:
             Path to the .emlx file, or None if not found / path is NULL
@@ -806,7 +821,9 @@ class IndexManager:
             where.append("account = ?")
             params.append(account)
         if mailbox:
-            clause, paths = self._mailbox_clause(conn, mailbox, account)
+            clause, paths = self._mailbox_clause(
+                conn, mailbox, account, exclude_accounts=exclude_accounts
+            )
             where.append(clause)
             params.extend(paths)
 
@@ -825,6 +842,8 @@ class IndexManager:
         message_id: int,
         account: str | None = None,
         mailbox: str | None = None,
+        *,
+        exclude_accounts: Iterable[str] | None = None,
     ) -> int:
         """Delete a single email entry from the index.
 
@@ -841,6 +860,8 @@ class IndexManager:
                 accounts (rare).
             mailbox: Optional mailbox filter — full path or a leaf
                 only one mailbox has; never widens to a subtree.
+            exclude_accounts: Account UUIDs never considered when
+                resolving ``mailbox`` (keeps them out of error messages)
 
         Returns:
             Number of rows deleted (typically 0 or 1).
@@ -858,7 +879,9 @@ class IndexManager:
             where.append("account = ?")
             params.append(account)
         if mailbox:
-            clause, paths = self._mailbox_clause(conn, mailbox, account)
+            clause, paths = self._mailbox_clause(
+                conn, mailbox, account, exclude_accounts=exclude_accounts
+            )
             where.append(clause)
             params.extend(paths)
 
@@ -961,6 +984,8 @@ class IndexManager:
         message_id: int,
         account: str | None = None,
         mailbox: str | None = None,
+        *,
+        exclude_accounts: Iterable[str] | None = None,
     ) -> list[dict] | None:
         """Get attachment metadata for an email from the index.
 
@@ -971,6 +996,8 @@ class IndexManager:
             message_id: Mail.app message ID
             account: Optional account filter (UUID)
             mailbox: Optional mailbox filter
+            exclude_accounts: Account UUIDs never considered when
+                resolving ``mailbox`` (keeps them out of error messages)
 
         Returns:
             List of attachment dicts, or None if email not found
@@ -983,7 +1010,11 @@ class IndexManager:
             params.append(account)
         if mailbox:
             clause, paths = self._mailbox_clause(
-                conn, mailbox, account, column="e.mailbox"
+                conn,
+                mailbox,
+                account,
+                column="e.mailbox",
+                exclude_accounts=exclude_accounts,
             )
             where.append(clause)
             params.extend(paths)
