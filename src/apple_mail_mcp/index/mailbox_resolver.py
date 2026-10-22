@@ -173,9 +173,42 @@ def resolve_exclusions(
     ambiguous leaves instead of raising. Never raises.
     """
     stored = _stored_mailboxes(conn, account, exclude_accounts)
+    return _resolve_union(stored, values)
+
+
+def _resolve_union(
+    stored: dict[str, list[str]], values: Iterable[str]
+) -> list[str]:
     resolved: set[str] = set()
     for value in values:
         resolved.update(
             _resolve(stored, value, subtree=True, union_ambiguous=True)
         )
     return sorted(resolved)
+
+
+def resolve_search_filters(
+    conn: sqlite3.Connection,
+    mailbox: str | None,
+    exclude_mailboxes: Iterable[str] | None,
+    *,
+    account: str | None = None,
+    exclude_accounts: Iterable[str] | None = None,
+) -> tuple[list[str] | None, list[str]]:
+    """:func:`resolve_for_search` and :func:`resolve_exclusions` over a
+    single candidate query — search() always carries an exclusion
+    (default ``["Drafts"]``), so this is the common case.
+
+    Returns:
+        (include, exclude): ``include`` is None when ``mailbox`` is
+        unset, otherwise the resolved paths (possibly empty).
+
+    Raises:
+        AmbiguousMailboxError: ``mailbox`` is a leaf of several paths.
+    """
+    stored = _stored_mailboxes(conn, account, exclude_accounts)
+    include = None
+    if mailbox:
+        include = _resolve(stored, mailbox, subtree=True, union_ambiguous=False)
+    exclude = _resolve_union(stored, exclude_mailboxes or ())
+    return include, exclude

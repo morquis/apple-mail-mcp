@@ -671,3 +671,19 @@ class TestNestedMailboxFilter:
             search_fts(nested_db, "budget", account="acct-2", mailbox="Steuer")
             == []
         )
+
+    def test_resolves_once_per_call(self, nested_db):
+        """mailbox and exclude_mailboxes share one candidate query —
+        exclude_mailboxes defaults to ["Drafts"] on every search()."""
+        statements: list[str] = []
+        nested_db.set_trace_callback(statements.append)
+        try:
+            search_fts(
+                nested_db,
+                "budget",
+                mailbox="[Gmail]",
+                exclude_mailboxes=["Spam"],
+            )
+        finally:
+            nested_db.set_trace_callback(None)
+        assert sum("DISTINCT" in s for s in statements) == 1
