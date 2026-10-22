@@ -721,53 +721,58 @@ class TestExclusionSnapshot:
         reader.close()
         writer.close()
 
-    def _arrive_after_resolution(self, monkeypatch, writer):
-        """Commit a Private row right after any candidate lookup."""
-        from apple_mail_mcp.index import mailbox_resolver
+    def _arrive_after_resolution(self, monkeypatch, writer) -> list[bool]:
+        """Commit a Private row once the exclusion filter is prepared
+        but before the query runs. Returns a list that records the
+        insert, so a test can prove the race actually happened."""
+        from apple_mail_mcp.index import search as search_module
 
-        real = mailbox_resolver._stored_mailboxes
-        done = []
+        real = search_module.exclusion_clause
+        arrived: list[bool] = []
 
         def racing(*args, **kwargs):
             result = real(*args, **kwargs)
-            if done:
-                return result
-            done.append(True)
-            writer.execute(
-                "INSERT INTO emails (message_id, account, mailbox, "
-                "subject, sender, content, date_received, attachment_count) "
-                "VALUES (2, 'acct', 'Private', 'needle', 'a@b', 'needle', "
-                "'2026-01-01', 1)"
-            )
-            writer.execute(
-                "INSERT INTO attachments (email_rowid, filename) "
-                "VALUES (last_insert_rowid(), 'needle.pdf')"
-            )
-            writer.commit()
+            if not arrived:
+                arrived.append(True)
+                writer.execute(
+                    "INSERT INTO emails (message_id, account, mailbox, "
+                    "subject, sender, content, date_received, "
+                    "attachment_count) VALUES (2, 'acct', 'Private', "
+                    "'needle', 'a@b', 'needle', '2026-01-01', 1)"
+                )
+                writer.execute(
+                    "INSERT INTO attachments (email_rowid, filename) "
+                    "VALUES (last_insert_rowid(), 'needle.pdf')"
+                )
+                writer.commit()
             return result
 
-        monkeypatch.setattr(mailbox_resolver, "_stored_mailboxes", racing)
+        monkeypatch.setattr(search_module, "exclusion_clause", racing)
+        return arrived
 
     def test_search(self, two_conns, monkeypatch):
         reader, writer = two_conns
-        self._arrive_after_resolution(monkeypatch, writer)
+        arrived = self._arrive_after_resolution(monkeypatch, writer)
         hits = search_fts(reader, "needle", exclude_mailboxes=["Private"])
+        assert arrived == [True]
         assert [h.mailbox for h in hits] == ["INBOX"]
 
     def test_highlight(self, two_conns, monkeypatch):
         reader, writer = two_conns
-        self._arrive_after_resolution(monkeypatch, writer)
+        arrived = self._arrive_after_resolution(monkeypatch, writer)
         hits = search_fts_highlight(
             reader, "needle", exclude_mailboxes=["Private"]
         )
+        assert arrived == [True]
         assert [h.mailbox for h in hits] == ["INBOX"]
 
     def test_attachments(self, two_conns, monkeypatch):
         reader, writer = two_conns
-        self._arrive_after_resolution(monkeypatch, writer)
+        arrived = self._arrive_after_resolution(monkeypatch, writer)
         rows = search_attachments(
             reader, "needle", exclude_mailboxes=["Private"]
         )
+        assert arrived == [True]
         assert {r["mailbox"] for r in rows} == {"INBOX"}
 
 
