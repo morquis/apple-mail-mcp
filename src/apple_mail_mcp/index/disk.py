@@ -1286,13 +1286,14 @@ def _infer_account_mailbox(emlx_path: Path, mail_dir: Path) -> tuple[str, str]:
         components: list[str] = []
         saw_mbox = False
         for part in parts[1:]:
-            if part == "Data":
-                break
+            # Data/ only ends the name after a .mbox: above the first one
+            # it is a plain parent directory like any other.
             if part.endswith(".mbox"):
                 components.append(part[:-5])
                 saw_mbox = True
             elif saw_mbox:
-                # Store UUID between the leaf .mbox and Data/ — not a level.
+                # Data/ payload, or the store UUID between the leaf .mbox
+                # and Data/ — not a level.
                 break
             else:
                 # Plain parent directory above the first .mbox.

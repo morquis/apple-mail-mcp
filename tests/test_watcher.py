@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sqlite3
 from pathlib import Path
+from typing import ClassVar
 from unittest.mock import patch
 
 import pytest
@@ -366,3 +367,48 @@ class TestNestedMailboxRegex:
         assert m is not None
         assert m.group(2) == "Work/Q1"
         assert m.group(3) == "49461"
+
+
+class TestParserParity:
+    """Watcher and disk sync must derive the same (account, mailbox) for
+    a path — the pair is part of the row key, so a mismatch makes the
+    watcher overwrite or delete another mailbox's row (#107 review)."""
+
+    MAIL_DIR = Path("/Users/x/Library/Mail/V10")
+
+    CASES: ClassVar[list[tuple[str, str | None]]] = [
+        ("acc/INBOX.mbox/Data/1/Messages/1.emlx", "INBOX"),
+        ("acc/[Gmail].mbox/Spam.mbox/Data/1/Messages/2.emlx", "[Gmail]/Spam"),
+        (
+            "acc/Ablage.mbox/Nebenkosten.mbox/E93C0B8E/Data/2/Messages/3.emlx",
+            "Ablage/Nebenkosten",
+        ),
+        ("acc/Work/Projects.mbox/Data/1/Messages/4.emlx", "Work/Projects"),
+        ("acc/Work/Q1.mbox/Data/9/4/Messages/5.partial.emlx", "Work/Q1"),
+        # A mailbox whose real name ends in ".mbox" (one suffix only)
+        ("acc/Reports.mbox.mbox/Data/Messages/6.emlx", "Reports.mbox"),
+        ("acc/A.mbox/Reports.mbox.mbox/Data/Messages/7.emlx", "A/Reports.mbox"),
+        # A plain parent directory named "Data" above the first .mbox
+        ("acc/Data/A.mbox/Data/Messages/8.emlx", "Data/A"),
+        ("acc/Work/Data/X.mbox/Data/1/Messages/9.emlx", "Work/Data/X"),
+        ("acc/A.mbox/B/C.mbox/Data/1/Messages/10.emlx", None),
+    ]
+
+    @pytest.mark.parametrize(("rel", "expected"), CASES)
+    def test_watcher_matches_disk_parser(
+        self, tmp_path: Path, rel: str, expected: str | None
+    ):
+        from apple_mail_mcp.index.disk import _infer_account_mailbox
+
+        db_path = tmp_path / "w.db"
+        create_connection(str(db_path)).close()
+        path = self.MAIL_DIR / rel
+
+        _, disk_mailbox = _infer_account_mailbox(path, self.MAIL_DIR)
+        parsed = IndexWatcher(db_path)._parse_path(path)
+
+        assert parsed is not None
+        assert parsed[0] == "acc"
+        assert parsed[1] == disk_mailbox
+        if expected is not None:
+            assert disk_mailbox == expected
